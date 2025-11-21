@@ -68,13 +68,17 @@ echo ""
 # ---------------------------------------------------------
 # Başlangıç soruları
 # ---------------------------------------------------------
-echo -ne "${YELLOW}Domainleri Mailcow'a eklemek istiyor musun? (E/H): ${NC}"
+echo -ne "${YELLOW}Domainleri Mailcow'a eklemek istiyor musun? (yes/no): ${NC}"
 read -r DOMAIN_CONFIRM
-[[ "$DOMAIN_CONFIRM" =~ ^[Ee]$ ]] && DO_DOMAIN_IMPORT=1 || DO_DOMAIN_IMPORT=0
+[[ "$DOMAIN_CONFIRM" =~ ^[Yy] ]] && DO_DOMAIN_IMPORT=1 || DO_DOMAIN_IMPORT=0
 
-echo -ne "${YELLOW}Mailboxları migrate etmek istiyor musun? (E/H): ${NC}"
+echo -ne "${YELLOW}Domainlere eposta adresleri (mailbox) eklemek istiyor musun? (yes/no): ${NC}"
 read -r MAILBOX_CONFIRM
-[[ "$MAILBOX_CONFIRM" =~ ^[Ee]$ ]] && DO_MAILBOX_IMPORT=1 || DO_MAILBOX_IMPORT=0
+[[ "$MAILBOX_CONFIRM" =~ ^[Yy] ]] && DO_MAILBOX_IMPORT=1 || DO_MAILBOX_IMPORT=0
+
+echo -ne "${YELLOW}Domainler için mail senkronizasyonu (imapsync) yapılsın mı? (yes/no): ${NC}"
+read -r MAIL_SYNC_CONFIRM
+[[ "$MAIL_SYNC_CONFIRM" =~ ^[Yy] ]] && DO_MAIL_SYNC=1 || DO_MAIL_SYNC=0
 echo ""
 
 # ---------------------------------------------------------
@@ -104,7 +108,7 @@ fi
 # Kullanıcıları çek
 # ---------------------------------------------------------
 
-TMPFILE="/dev/shm/cp_accounts.txt"
+TMPFILE="/tmp/cp_accounts_$$.txt"
 
 echo -e "${YELLOW}[*] Kullanıcılar alınıyor...${NC}"
 eval "$SSH_CMD $CP_SSH_USER@$CP_IP \"mysql -ucyberpanel -p'$CP_MYSQL_PASS' cyberpanel -N -e 'SELECT email,password FROM e_users;'\"" \
@@ -214,15 +218,54 @@ if [ $DO_MAILBOX_IMPORT -eq 1 ]; then
 
     echo -e "${GREEN}OK${NC}"
 
+  done
+
+else
+  echo -e "${YELLOW}Mailbox import SKIP${NC}"
+  echo "[SKIP] Mailbox import atlandı" >> "$MAIN_LOG"
+fi
+
+# ---------------------------------------------------------
+# MAIL SYNC LOOP
+# ---------------------------------------------------------
+if [ $DO_MAIL_SYNC -eq 1 ]; then
+  echo -e "${YELLOW}[*] Mail senkronizasyonu başlıyor...${NC}"
+  echo "[*] Mail senkronizasyonu başlıyor..." >> "$MAIN_LOG"
+  
+  # Docker image'ı önceden çek
+  echo -e "${YELLOW}[*] Docker image kontrol ediliyor...${NC}"
+  if ! docker images gilleslamiral/imapsync --format "{{.Repository}}:{{.Tag}}" | grep -q "gilleslamiral/imapsync"; then
+    echo -e "${YELLOW}[*] Docker image çekiliyor (bu biraz zaman alabilir)...${NC}"
+    docker pull gilleslamiral/imapsync:latest >/dev/null 2>&1
+  fi
+  echo -e "${GREEN}✓ Docker image hazır${NC}"
+
+  exec 3< "$TMPFILE"
+  while IFS=$'\t' read -u 3 -r EMAIL HASH; do
+    [ -z "$EMAIL" ] && continue
+
+    SAFE="${EMAIL//[@.]/_}"
+
+    echo -e "${BLUE}────────────────────────────────────────────${NC}"
+    echo -e "${GREEN}Hesap: $EMAIL${NC}"
+
     # IMAP test (kaynak)
     echo -ne "${YELLOW} → IMAP test (kaynak)... ${NC}"
 
-    if ! timeout 10 docker run --rm gilleslamiral/imapsync imapsync \
+    TEST_OUTPUT=$(timeout 30 docker run --rm gilleslamiral/imapsync imapsync \
          --host1 "$CP_IP" --port1 "$CP_IMAP_PORT" --ssl1 \
          --user1 "$EMAIL" --password1 "$CP_IMAP_PASS" \
-         --dry >/dev/null 2>&1; then
+         --dry 2>&1)
+    TEST_EXIT=$?
 
+    if [ $TEST_EXIT -ne 0 ]; then
       echo -e "${RED}FAIL${NC}"
+      echo "[HATA] IMAP test başarısız: $EMAIL" >> "$MAIN_LOG"
+      echo "Hata detayı: $TEST_OUTPUT" >> "$MAIN_LOG"
+      echo "---" >> "$MAIN_LOG"
+      # Hata mesajının ilk satırını göster
+      ERROR_MSG=$(echo "$TEST_OUTPUT" | head -n 3 | tr '\n' ' ')
+      echo -e "${RED}   → $ERROR_MSG${NC}"
       echo "$EMAIL" >> "$FAIL_LOG"
       continue
     fi
@@ -248,9 +291,12 @@ if [ $DO_MAILBOX_IMPORT -eq 1 ]; then
   done
 
 else
-  echo -e "${YELLOW}Mailbox import SKIP${NC}"
-  echo "[SKIP] Mailbox import atlandı" >> "$MAIN_LOG"
+  echo -e "${YELLOW}Mail senkronizasyonu SKIP${NC}"
+  echo "[SKIP] Mail senkronizasyonu atlandı" >> "$MAIN_LOG"
 fi
+
+# Temizlik
+[ -f "$TMPFILE" ] && rm -f "$TMPFILE"
 
 echo ""
 echo -e "${GREEN}=== TAMAMLANDI ===${NC}"
