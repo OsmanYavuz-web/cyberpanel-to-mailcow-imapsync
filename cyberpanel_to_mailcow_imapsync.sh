@@ -122,7 +122,7 @@ echo "[OK] $USER_COUNT kullanıcı bulundu" >> "$MAIN_LOG"
 echo ""
 
 # ---------------------------------------------------------
-# Domain ekleme (API, 100 mailbox / 100 alias, toplam quota 1TB)
+# Domain ekleme (API, geniş limitler)
 # ---------------------------------------------------------
 
 if [ $DO_DOMAIN_IMPORT -eq 1 ]; then
@@ -141,20 +141,23 @@ if [ $DO_DOMAIN_IMPORT -eq 1 ]; then
         \"active\": \"1\",
         \"domain\": \"$D\",
         \"description\": \"\",
-        \"aliases\": \"100\",
-        \"mailboxes\": \"100\",
-        \"maxquota\": \"10240\",
-        \"defquota\": \"10240\",
-        \"quota\": \"102400\",
+        \"aliases\": \"9999\",
+        \"mailboxes\": \"9999\",
+        \"maxquota\": \"1048576\",
+        \"defquota\": \"3072\",
+        \"quota\": \"1048576\",
         \"backupmx\": \"0\",
         \"relay_all_recipients\": \"0\",
         \"rl_frame\": \"s\",
         \"rl_value\": \"10\"
       }")
 
-    if echo "$RESPONSE" | grep -q "mailbox"; then
+    if echo "$RESPONSE" | grep -q "domain_added"; then
       echo -e " ${GREEN}OK${NC}"
       echo "[OK] Domain eklendi: $D" >> "$MAIN_LOG"
+    elif echo "$RESPONSE" | grep -q "domain_exists"; then
+      echo -e " ${YELLOW}VAR${NC}"
+      echo "[INFO] Domain zaten var: $D" >> "$MAIN_LOG"
     else
       echo -e " ${RED}HATA${NC}"
       echo "[HATA] Domain eklenemedi: $D - $RESPONSE" >> "$MAIN_LOG"
@@ -188,7 +191,7 @@ if [ $DO_MAILBOX_IMPORT -eq 1 ]; then
     # Mailbox CREATE
     echo -ne "${YELLOW} → Mailbox oluşturuluyor... ${NC}"
 
-    curl -k -s -X POST "$MAILCOW_SERVER/v1/add/mailbox" \
+    MB_RESPONSE=$(curl -k -s -X POST "$MAILCOW_SERVER/v1/add/mailbox" \
       -H "X-API-Key: $MAILCOW_API_KEY" \
       -H "Content-Type: application/json" \
       -d "{
@@ -198,25 +201,44 @@ if [ $DO_MAILBOX_IMPORT -eq 1 ]; then
         \"name\":\"$LOCALPART\",
         \"password\":\"$MAILCOW_NEW_PASS\",
         \"password2\":\"$MAILCOW_NEW_PASS\",
-        \"quota\":\"10240\",
+        \"quota\":\"3072\",
         \"force_pw_update\":\"0\"
-      }" >/dev/null
+      }")
 
-    echo -e "${GREEN}OK${NC}"
+    if echo "$MB_RESPONSE" | grep -q "mailbox_added"; then
+      echo -e "${GREEN}OK${NC}"
+      echo "[OK] Mailbox eklendi: $EMAIL" >> "$MAIN_LOG"
+    elif echo "$MB_RESPONSE" | grep -q "mailbox_exists"; then
+      echo -e "${YELLOW}VAR${NC}"
+      echo "[INFO] Mailbox zaten var: $EMAIL" >> "$MAIN_LOG"
+    else
+      echo -e "${RED}HATA${NC}"
+      echo "[HATA] Mailbox eklenemedi: $EMAIL - $MB_RESPONSE" >> "$MAIN_LOG"
+      continue
+    fi
 
     # Alias CREATE
     echo -ne "${YELLOW} → Alias ekleniyor... ${NC}"
 
-    curl -k -s -X POST "$MAILCOW_SERVER/v1/add/alias" \
+    ALIAS_RESPONSE=$(curl -k -s -X POST "$MAILCOW_SERVER/v1/add/alias" \
       -H "X-API-Key: $MAILCOW_API_KEY" \
       -H "Content-Type: application/json" \
       -d "{
         \"active\":\"1\",
         \"address\":\"$EMAIL\",
         \"goto\":\"$EMAIL\"
-      }" >/dev/null
+      }")
 
-    echo -e "${GREEN}OK${NC}"
+    if echo "$ALIAS_RESPONSE" | grep -q "alias_added"; then
+      echo -e "${GREEN}OK${NC}"
+      echo "[OK] Alias eklendi: $EMAIL" >> "$MAIN_LOG"
+    elif echo "$ALIAS_RESPONSE" | grep -q "alias_exists"; then
+      echo -e "${YELLOW}VAR${NC}"
+      echo "[INFO] Alias zaten var: $EMAIL" >> "$MAIN_LOG"
+    else
+      echo -e "${RED}HATA${NC}"
+      echo "[HATA] Alias eklenemedi: $EMAIL - $ALIAS_RESPONSE" >> "$MAIN_LOG"
+    fi
 
   done
 
@@ -263,7 +285,6 @@ if [ $DO_MAIL_SYNC -eq 1 ]; then
       echo "[HATA] IMAP test başarısız: $EMAIL" >> "$MAIN_LOG"
       echo "Hata detayı: $TEST_OUTPUT" >> "$MAIN_LOG"
       echo "---" >> "$MAIN_LOG"
-      # Hata mesajının ilk satırını göster
       ERROR_MSG=$(echo "$TEST_OUTPUT" | head -n 3 | tr '\n' ' ')
       echo -e "${RED}   → $ERROR_MSG${NC}"
       echo "$EMAIL" >> "$FAIL_LOG"
@@ -284,8 +305,10 @@ if [ $DO_MAIL_SYNC -eq 1 ]; then
           > "$LOG_DIR/$SAFE.log" 2>&1; then
 
       echo -e "${GREEN}✓ Migration OK${NC}"
+      echo "[OK] IMAPSYNC başarılı: $EMAIL" >> "$MAIN_LOG"
     else
       echo -e "${RED}✗ Migration HATA → $LOG_DIR/$SAFE.log${NC}"
+      echo "[HATA] IMAPSYNC hata: $EMAIL → $LOG_DIR/$SAFE.log" >> "$MAIN_LOG"
     fi
 
   done
